@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Img2PPT — 图片转可编辑 PowerPoint</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <div class="eyebrow">LOCAL · EDITABLE · PRIVATE</div>
+          <h1>Img2PPT</h1>
+          <p>把概念图、架构图和商业流程图重建为可编辑的 PowerPoint 原生对象。</p>
+        </div>
+        <button id="settingsButton" class="ghost">设置</button>
+      </header>
+
+      <section id="dropZone" class="drop-zone">
+        <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden />
+        <div class="drop-icon">＋</div>
+        <h2>拖入图片，或点击选择</h2>
+        <p>每张图片生成一页；支持 PNG、JPEG、WebP</p>
+      </section>
+
+      <section class="policy">
+        <div><strong>透明文字框</strong><span>文字与背景形状完全分离</span></div>
+        <div><strong>原生形状优先</strong><span>大面积实心区域禁止位图回退</span></div>
+        <div><strong>字体自适应</strong><span>按字形高度映射字号并防止溢出</span></div>
+      </section>
+
+      <section id="queue" class="queue" hidden>
+        <div class="queue-head">
+          <div>
+            <h2>待转换图片</h2>
+            <p id="queueMeta"></p>
+          </div>
+          <button id="clearButton" class="ghost">清空</button>
+        </div>
+        <div id="fileList" class="file-list"></div>
+        <div class="actions">
+          <button id="analyzeButton" class="secondary">先分析</button>
+          <button id="convertButton" class="primary">生成可编辑 PPT</button>
+        </div>
+        <div id="status" class="status" hidden></div>
+        <div id="report" class="report" hidden></div>
+      </section>
+    </main>
+
+    <dialog id="settingsDialog">
+      <form method="dialog">
+        <div class="dialog-head">
+          <h2>设置</h2>
+          <button value="cancel" class="ghost">关闭</button>
+        </div>
+        <label>可选云端增强 API Key
+          <input id="apiKey" type="password" autocomplete="off" placeholder="仅保存在当前页面内存，不写入磁盘" />
+        </label>
+        <p>当前版本的本地识别不需要 API Key。刷新页面后该字段自动清空。</p>
+      </form>
+    </dialog>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
