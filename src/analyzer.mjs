@@ -3,6 +3,8 @@ import { RECONSTRUCTION_POLICY } from "./policy.mjs";
 import { colorDistance, luminance, medianColor, quantize, rgbHex } from "./color.mjs";
 import { boxArea, expandBox, intersects, mergeBoxes } from "./geometry.mjs";
 import { PSM, recognizeText } from "./ocr.mjs";
+import { analyzeWithVision } from "./vision.mjs";
+import { enhanceTextLines } from "./text-model.mjs";
 
 function pixelAt(data, channels, width, x, y) {
   const offset = (y * width + x) * channels;
@@ -52,25 +54,85 @@ function sampleTextColor(data, channels, width, height, bbox) {
   return candidates[0]?.color || (luminance(background) > 170 ? [20, 20, 20] : [255, 255, 255]);
 }
 
-function estimateFont(text, bbox, imageHeight, slideHeight, densityScale = 1) {
-  const glyphHeight = Math.max(1, bbox.y1 - bbox.y0);
-  const width = Math.max(1, bbox.x1 - bbox.x0);
-  const rawPt = glyphHeight * slideHeight * 72 / imageHeight;
+function median(values) {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) return 0;
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+function textWidthUnits(text) {
+  let units = 0;
+  for (const char of text) {
+    if (/\s/.test(char)) units += 0.28;
+    else if (/[ilI1|.,:;'`]/.test(char)) units += 0.28;
+    else if (/[MW@%&#]/.test(char)) units += 0.9;
+    else if (/[A-Z0-9]/.test(char)) units += 0.61;
+    else units += 0.52;
+  }
+  return Math.max(1, units);
+}
+
+export function estimateFont(line, imageWidth, imageHeight, slideWidth, slideHeight) {
+  const { text, bbox } = line;
+  const wordHeights = (line.words || [])
+    .filter((word) => word.confidence >= 45 && /[A-Za-z0-9]/.test(word.text))
+    .map((word) => word.bbox.y1 - word.bbox.y0)
+    .filter((height) => height >= 2);
+  const boxHeight = Math.max(1, bbox.y1 - bbox.y0);
+  const glyphHeight = wordHeights.length ? Math.min(boxHeight, median(wordHeights)) : boxHeight;
+  const heightPt = glyphHeight * slideHeight * 72 / imageHeight;
+  const boxWidthIn = Math.max(0.02, (bbox.x1 - bbox.x0) * slideWidth / imageWidth);
+  const widthPt = boxWidthIn * 72 / textWidthUnits(text);
   const upperRatio = (text.match(/[A-Z0-9]/g) || []).length / Math.max(1, text.replace(/\s/g, "").length);
-  const isTitle = rawPt >= 18 || (upperRatio > 0.55 && rawPt > 12);
+  const isTitle = heightPt >= 18 || (upperRatio > 0.55 && heightPt > 12);
+  // Height is the primary signal; width is a hard guardrail against wrapping.
+  // Slightly enlarge very short labels because their tight OCR boxes otherwise
+  // underestimate the advance width used by PowerPoint.
+  const shortLabelScale = text.length <= 4 ? 1.08 : 1;
+  const fittedPt = Math.min(heightPt * (isTitle ? 0.96 : 0.9), widthPt * 0.98) * shortLabelScale;
   const fontSize = Math.max(
     RECONSTRUCTION_POLICY.minFontPt,
-    Math.min(RECONSTRUCTION_POLICY.maxFontPt, rawPt * (isTitle ? 0.92 : 0.86) * densityScale)
+    Math.min(RECONSTRUCTION_POLICY.maxFontPt, fittedPt)
   );
   return {
     fontFace: RECONSTRUCTION_POLICY.defaultFontFace,
     fontSize: Math.round(fontSize * 10) / 10,
-    bold: isTitle || (upperRatio > 0.72 && rawPt > 10.5),
+    bold: isTitle || (upperRatio > 0.72 && heightPt > 10.5),
     margin: 0,
     breakLine: false,
     fit: "shrink",
-    valign: "mid"
+    valign: "mid",
+    measuredGlyphHeight: glyphHeight,
+    widthLimited: widthPt < heightPt * 0.9,
+    heightBasedFontPt: heightPt * (isTitle ? 0.96 : 0.9) * shortLabelScale,
+    maxWidthFontPt: widthPt * 0.98 * shortLabelScale
   };
+}
+
+function normalizeFontStyles(lines) {
+  return lines.map((line) => {
+    const peers = lines.filter((other) => {
+      const ratio = other.style.measuredGlyphHeight / Math.max(1, line.style.measuredGlyphHeight);
+      return ratio >= 0.86 && ratio <= 1.16 &&
+        other.style.bold === line.style.bold &&
+        Math.abs(other.bbox.y0 - line.bbox.y0) < Math.max(220, line.style.measuredGlyphHeight * 14);
+    });
+    if (peers.length < 2) return line;
+    const unconstrained = peers.filter((peer) => !peer.style.widthLimited);
+    const candidates = (unconstrained.length ? unconstrained : peers).map((peer) => peer.style.fontSize);
+    const target = median(candidates);
+    const fontSize = Math.max(
+      RECONSTRUCTION_POLICY.minFontPt,
+      Math.min(RECONSTRUCTION_POLICY.maxFontPt, target, line.style.maxWidthFontPt)
+    );
+    return {
+      ...line,
+      style: {
+        ...line.style,
+        fontSize: Math.round(fontSize * 10) / 10
+      }
+    };
+  });
 }
 
 function intersectionOverUnion(a, b) {
@@ -126,13 +188,49 @@ function normalizeLineFromWords(line) {
   };
 }
 
-function suppressDuplicateLines(lines) {
+function normalizedText(text) {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function textSimilarity(a, b) {
+  const left = normalizedText(a);
+  const right = normalizedText(b);
+  if (!left || !right) return 0;
+  if (left === right) return 1;
+  if (left.includes(right) || right.includes(left)) {
+    return Math.min(left.length, right.length) / Math.max(left.length, right.length);
+  }
+  const leftTokens = new Set(left.split(/\s+/));
+  const rightTokens = new Set(right.split(/\s+/));
+  const shared = [...leftTokens].filter((token) => rightTokens.has(token)).length;
+  return shared / Math.max(1, Math.max(leftTokens.size, rightTokens.size));
+}
+
+function intersectionOverSmaller(a, b) {
+  const x0 = Math.max(a.x0, b.x0);
+  const y0 = Math.max(a.y0, b.y0);
+  const x1 = Math.min(a.x1, b.x1);
+  const y1 = Math.min(a.y1, b.y1);
+  const intersection = Math.max(0, x1 - x0) * Math.max(0, y1 - y0);
+  return intersection / Math.max(1, Math.min(boxArea(a), boxArea(b)));
+}
+
+export function suppressDuplicateLines(lines) {
   const accepted = [];
-  for (const line of [...lines].sort((a, b) => b.confidence - a.confidence)) {
+  const priority = (line) => (line.forcedColorHex ? 20 : 0) + line.confidence;
+  for (const line of [...lines].sort((a, b) => priority(b) - priority(a))) {
     const duplicate = accepted.some((other) => {
-      const sameBand = Math.abs(other.bbox.y0 - line.bbox.y0) <= 2 && Math.abs(other.bbox.y1 - line.bbox.y1) <= 2;
-      return intersectionOverUnion(other.bbox, line.bbox) > 0.62 ||
-        (sameBand && other.text.toLowerCase() === line.text.toLowerCase());
+      const height = Math.max(1, Math.min(
+        other.bbox.y1 - other.bbox.y0,
+        line.bbox.y1 - line.bbox.y0
+      ));
+      const sameBand = Math.abs(
+        (other.bbox.y0 + other.bbox.y1) / 2 -
+        (line.bbox.y0 + line.bbox.y1) / 2
+      ) <= height * 0.55;
+      const similarity = textSimilarity(other.text, line.text);
+      return (intersectionOverSmaller(other.bbox, line.bbox) > 0.42 && similarity >= 0.34) ||
+        (sameBand && similarity >= 0.78);
     });
     if (!duplicate) accepted.push(line);
   }
@@ -142,7 +240,12 @@ function suppressDuplicateLines(lines) {
 function buildTextMask(lines, width, height) {
   const mask = new Uint8Array(width * height);
   for (const line of lines) {
-    const box = expandBox(line.bbox, RECONSTRUCTION_POLICY.textPaddingPx, width, height);
+    const glyphHeight = Math.max(1, line.style?.measuredGlyphHeight || line.bbox.y1 - line.bbox.y0);
+    const padding = Math.max(
+      RECONSTRUCTION_POLICY.textPaddingPx,
+      Math.round(glyphHeight * RECONSTRUCTION_POLICY.textPaddingRatio)
+    );
+    const box = expandBox(line.bbox, padding, width, height);
     for (let y = box.y0; y < box.y1; y += 1) {
       mask.fill(1, y * width + box.x0, y * width + box.x1);
     }
@@ -450,10 +553,97 @@ function groupIconComponents(components, image) {
   return [...others, ...groupedIcons];
 }
 
-export async function analyzeImage(imageBuffer, { sourceName = "image" } = {}) {
+function normalizedVisionBox(bbox, image) {
+  return {
+    x0: Math.max(0, Math.round(bbox.x * image.width / 1000)),
+    y0: Math.max(0, Math.round(bbox.y * image.height / 1000)),
+    x1: Math.min(image.width, Math.round((bbox.x + bbox.w) * image.width / 1000)),
+    y1: Math.min(image.height, Math.round((bbox.y + bbox.h) * image.height / 1000))
+  };
+}
+
+function overlapOfCandidate(candidate, region) {
+  const x0 = Math.max(candidate.x0, region.x0);
+  const y0 = Math.max(candidate.y0, region.y0);
+  const x1 = Math.min(candidate.x1, region.x1);
+  const y1 = Math.min(candidate.y1, region.y1);
+  return Math.max(0, x1 - x0) * Math.max(0, y1 - y0) / Math.max(1, boxArea(candidate));
+}
+
+function mergeVisionComponents(localComponents, visionLayout, image) {
+  if (!visionLayout) return localComponents;
+  const semantic = visionLayout.objects.flatMap((object) => {
+    if (object.kind === "text") return [];
+    const bbox = normalizedVisionBox(object.bbox, image);
+    const width = bbox.x1 - bbox.x0;
+    const height = bbox.y1 - bbox.y0;
+    const common = {
+      bbox,
+      width,
+      height,
+      count: width * height,
+      fillRatio: 1,
+      color: null,
+      colorHex: object.kind === "icon" ? object.foregroundColor : object.backgroundColor,
+      colorVariance: 0,
+      aspect: width / Math.max(1, height),
+      areaRatio: boxArea(bbox) / (image.width * image.height),
+      source: "vision",
+      label: object.label,
+      confidence: object.confidence,
+      layer: object.layer,
+      containsText: object.containsText
+    };
+    if (object.kind === "icon") {
+      return [{
+        ...common,
+        type: "semanticIcon",
+        iconKey: object.iconKey,
+        foregroundColorHex: object.foregroundColor,
+        backgroundShape: object.backgroundShape,
+        backgroundColorHex: object.backgroundColor
+      }];
+    }
+    if (object.kind === "image") return [{ ...common, type: "picture" }];
+    return [{
+      ...common,
+      type: object.kind,
+      colorHex: object.backgroundColor,
+      visionShape: true
+    }];
+  });
+  const semanticRegions = semantic.map((component) => component.bbox);
+  const retainedLocal = localComponents.filter((component) => {
+    if (component.source === "solidBand") return true;
+    return !semanticRegions.some((bbox) => overlapOfCandidate(component.bbox, bbox) > 0.56);
+  });
+  const dedupedSemantic = semantic.filter((component) => !retainedLocal.some((local) => {
+    if (component.type === "semanticIcon" || component.type === "picture") return false;
+    return overlapOfCandidate(component.bbox, local.bbox) > 0.72 &&
+      ["roundRect", "rect", "ellipse", "line", "outlineRect"].includes(local.type);
+  }));
+  return [...retainedLocal, ...dedupedSemantic]
+    .sort((a, b) => (a.layer || 0) - (b.layer || 0));
+}
+
+export async function analyzeImage(imageBuffer, {
+  sourceName = "image",
+  vision = {},
+  textModel = {}
+} = {}) {
   const normalized = sharp(imageBuffer).ensureAlpha();
   const { data, info } = await normalized.raw().toBuffer({ resolveWithObject: true });
   const image = { width: info.width, height: info.height, channels: info.channels };
+  const visionPromise = vision.enabled && vision.apiKey
+    ? analyzeWithVision(imageBuffer, {
+      apiKey: vision.apiKey,
+      model: vision.model,
+      provider: vision.provider,
+      apiStyle: vision.apiStyle,
+      baseUrl: vision.baseUrl,
+      sourceName
+    }).catch((error) => ({ error: error.message, objects: [], pageSummary: "" }))
+    : Promise.resolve(null);
   const slideHeight = RECONSTRUCTION_POLICY.slideWidthIn * image.height / image.width;
   const solidBands = detectSolidBands(data, info.channels, image.width, image.height);
   // White text placed on dark/gradient banners is handled with targeted
@@ -516,7 +706,7 @@ export async function analyzeImage(imageBuffer, { sourceName = "image" } = {}) {
     const lineArea = Math.max(1, boxArea(line.bbox));
     return overlapX * overlapY / lineArea > 0.32;
   }));
-  const rawLines = suppressDuplicateLines(
+  let rawLines = suppressDuplicateLines(
     [
       ...filteredGeneralLines,
       ...bandTextLines
@@ -529,16 +719,49 @@ export async function analyzeImage(imageBuffer, { sourceName = "image" } = {}) {
           line.bbox.y0 > image.height * 0.9;
       })
   );
-  const textLines = rawLines
+  let textEnhancement = {
+    used: false,
+    error: null,
+    provider: null,
+    model: null,
+    correctionCount: 0
+  };
+  if (textModel.enabled && textModel.apiKey) {
+    try {
+      const enhanced = await enhanceTextLines(rawLines, textModel);
+      rawLines = enhanced.lines;
+      textEnhancement = {
+        used: enhanced.used,
+        error: enhanced.error,
+        provider: enhanced.provider,
+        model: enhanced.model,
+        correctionCount: enhanced.correctionCount
+      };
+    } catch (error) {
+      textEnhancement = {
+        used: false,
+        error: error.message,
+        provider: textModel.provider || null,
+        model: textModel.model || null,
+        correctionCount: 0
+      };
+    }
+  }
+  const textLines = normalizeFontStyles(rawLines
     .map((line) => {
       const color = line.forcedColorHex ? null : sampleTextColor(data, info.channels, info.width, info.height, line.bbox);
-      const densityScale = rawLines.length > 95 ? 0.78 : rawLines.length > 72 ? 0.88 : 1;
       return {
         ...line,
         colorHex: line.forcedColorHex || rgbHex(color),
-        style: estimateFont(line.text, line.bbox, image.height, slideHeight, densityScale)
+        style: estimateFont(
+          line,
+          image.width,
+          image.height,
+          RECONSTRUCTION_POLICY.slideWidthIn,
+          slideHeight
+        )
       };
-    });
+    }));
   const textMask = buildTextMask(textLines, image.width, image.height);
   const connected = connectedComponents(data, info.channels, image.width, image.height, textMask)
       .map((component) => ({ ...component, ...classifyComponent(component, image) }))
@@ -548,21 +771,58 @@ export async function analyzeImage(imageBuffer, { sourceName = "image" } = {}) {
         const overlapY = Math.max(0, Math.min(component.bbox.y1, band.bbox.y1) - Math.max(component.bbox.y0, band.bbox.y0));
         return overlapX * overlapY / Math.max(1, boxArea(component.bbox)) > 0.84;
       }));
-  const components = groupIconComponents(deduplicate(
+  const localComponents = groupIconComponents(deduplicate(
     [...solidBands, ...connected],
     textLines
   ), image);
+  const visionLayout = await visionPromise;
+  const components = mergeVisionComponents(
+    localComponents,
+    visionLayout?.error ? null : visionLayout,
+    image
+  );
   return {
     sourceName,
     image,
     slide: { width: RECONSTRUCTION_POLICY.slideWidthIn, height: slideHeight },
     textLines,
     components,
+    vision: visionLayout ? {
+      enabled: true,
+      used: !visionLayout.error,
+      provider: visionLayout.provider || vision.provider || null,
+      model: visionLayout.model || vision.model,
+      apiStyle: visionLayout.apiStyle || vision.apiStyle || null,
+      error: visionLayout.error || null,
+      pageSummary: visionLayout.pageSummary || "",
+      objectCount: visionLayout.objects?.length || 0
+    } : {
+      enabled: false,
+      used: false,
+      provider: null,
+      model: null,
+      apiStyle: null,
+      error: null,
+      pageSummary: "",
+      objectCount: 0
+    },
+    textEnhancement,
     summary: {
       textCount: textLines.length,
       componentCount: components.length,
-      nativeShapeCount: components.filter((c) => ["roundRect", "ellipse", "outlineRect", "line"].includes(c.type)).length,
-      iconCount: components.filter((c) => c.type === "icon").length,
+      nativeShapeCount: components.filter((c) => ["rect", "roundRect", "ellipse", "outlineRect", "line"].includes(c.type)).length,
+      iconCount: components.filter((c) => ["icon", "semanticIcon"].includes(c.type)).length,
+      semanticIconCount: components.filter((c) => c.type === "semanticIcon").length,
+      pictureCount: components.filter((c) => c.type === "picture").length,
+      visionUsed: Boolean(visionLayout && !visionLayout.error),
+      visionError: visionLayout?.error || null,
+      visionProvider: vision.enabled ? (visionLayout?.provider || vision.provider || null) : null,
+      visionModel: vision.enabled ? (visionLayout?.model || vision.model || null) : null,
+      textModelUsed: textEnhancement.used,
+      textModelError: textEnhancement.error,
+      textModelProvider: textEnhancement.provider,
+      textModelName: textEnhancement.model,
+      textCorrectionCount: textEnhancement.correctionCount,
       fragmentCount: components.filter((c) => c.type === "fragment").length,
       maxFragmentAreaRatio: Math.max(0, ...components.filter((c) => c.type === "fragment").map((c) => c.areaRatio))
     }

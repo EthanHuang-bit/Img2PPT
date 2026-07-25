@@ -1,12 +1,18 @@
 import { createWorker, PSM } from "tesseract.js";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 let workerPromise;
+const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 async function getWorker() {
   if (!workerPromise) {
     workerPromise = (async () => {
       const worker = await createWorker("eng", 1, {
-        logger: () => {}
+        logger: () => {},
+        langPath: appRoot,
+        gzip: false,
+        cacheMethod: "none"
       });
       await worker.setParameters({
         tessedit_pageseg_mode: PSM.SPARSE_TEXT,

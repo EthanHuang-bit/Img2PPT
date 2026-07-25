@@ -25,9 +25,9 @@
       </section>
 
       <section class="policy">
-        <div><strong>透明文字框</strong><span>文字与背景形状完全分离</span></div>
-        <div><strong>原生形状优先</strong><span>大面积实心区域禁止位图回退</span></div>
-        <div><strong>字体自适应</strong><span>按字形高度映射字号并防止溢出</span></div>
+        <div><strong>文字去重与擦除</strong><span>图片内文字先移除，再重建为可编辑文本</span></div>
+        <div><strong>图标分层</strong><span>徽章背景与纯色矢量图标分别生成</span></div>
+        <div><strong>智能版式</strong><span>字号同时受字高与文本宽度约束</span></div>
       </section>
 
       <section id="queue" class="queue" hidden>
@@ -51,13 +51,81 @@
     <dialog id="settingsDialog">
       <form method="dialog">
         <div class="dialog-head">
-          <h2>设置</h2>
+          <div>
+            <h2>大模型设置</h2>
+            <p class="dialog-subtitle">视觉模型负责看图分层；文本模型只做 OCR 纠错，可分别启用。</p>
+          </div>
           <button value="cancel" class="ghost">关闭</button>
         </div>
-        <label>可选云端增强 API Key
-          <input id="apiKey" type="password" autocomplete="off" placeholder="仅保存在当前页面内存，不写入磁盘" />
-        </label>
-        <p>当前版本的本地识别不需要 API Key。刷新页面后该字段自动清空。</p>
+        <section class="model-section">
+          <label class="check-row">
+            <input id="useVision" type="checkbox" />
+            <span><strong>启用视觉模型</strong><small>识别图标、图片、形状、边界框和层级；文字由本地 OCR 重建</small></span>
+          </label>
+          <div class="field-grid">
+            <label>服务商
+              <select id="visionProvider">
+                <option value="openai">OpenAI</option>
+                <option value="qwen">Qwen / 阿里云百炼</option>
+                <option value="custom">自定义 OpenAI 兼容服务</option>
+              </select>
+            </label>
+            <label>接口类型
+              <select id="visionApiStyle">
+                <option value="responses">Responses API</option>
+                <option value="chat-completions">Chat Completions</option>
+              </select>
+            </label>
+          </div>
+          <label>Base URL
+            <input id="visionBaseUrl" type="url" value="https://api.openai.com/v1" autocomplete="off" />
+          </label>
+          <div class="field-grid">
+            <label>模型
+              <input id="visionModel" type="text" value="gpt-5.6" autocomplete="off" />
+            </label>
+            <label>API Key
+              <input id="visionApiKey" type="password" autocomplete="off" placeholder="仅保存在当前页面内存" />
+            </label>
+          </div>
+          <div class="model-actions">
+            <button id="testVisionButton" type="button" class="secondary">测试视觉模型</button>
+            <span id="visionTestStatus" class="test-status"></span>
+          </div>
+          <p id="visionProviderHint" class="provider-hint"></p>
+        </section>
+
+        <section class="model-section">
+          <label class="check-row">
+            <input id="useTextModel" type="checkbox" />
+            <span><strong>启用文本后处理模型</strong><small>纠正明显 OCR 错字、空格和标点，不改变坐标</small></span>
+          </label>
+          <div class="field-grid">
+            <label>服务商
+              <select id="textProvider">
+                <option value="deepseek">DeepSeek</option>
+                <option value="qwen">Qwen / 阿里云百炼</option>
+                <option value="openai">OpenAI</option>
+                <option value="custom">自定义 OpenAI 兼容服务</option>
+              </select>
+            </label>
+            <label>模型
+              <input id="textModel" type="text" value="deepseek-v4-flash" autocomplete="off" />
+            </label>
+          </div>
+          <label>Base URL
+            <input id="textBaseUrl" type="url" value="https://api.deepseek.com" autocomplete="off" />
+          </label>
+          <label>API Key
+            <input id="textApiKey" type="password" autocomplete="off" placeholder="仅保存在当前页面内存" />
+          </label>
+          <div class="model-actions">
+            <button id="testTextButton" type="button" class="secondary">测试文本模型</button>
+            <span id="textTestStatus" class="test-status"></span>
+          </div>
+          <p id="textProviderHint" class="provider-hint"></p>
+        </section>
+        <p class="privacy-note">启用后，图片或 OCR 文本会发送到所配置的服务商。所有 API Key 只随当前请求传给本机服务，不写入磁盘、浏览器存储、日志或 PPT；刷新页面后自动清空。</p>
       </form>
     </dialog>
     <script type="module" src="/app.js"></script>

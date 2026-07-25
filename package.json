@@ -1,12 +1,12 @@
 {
   "name": "img2ppt",
-  "version": "0.2.0",
+  "version": "0.5.1",
   "private": true,
   "type": "module",
   "description": "Convert diagram images into editable PowerPoint slides with native text and shapes.",
   "scripts": {
     "start": "node src/server.mjs",
-    "check": "node --check src/server.mjs && node --check src/converter.mjs && node --check src/analyzer.mjs && node --check src/qa.mjs",
+    "check": "node --check src/server.mjs && node --check src/converter.mjs && node --check src/analyzer.mjs && node --check src/vision.mjs && node --check src/text-model.mjs && node --check src/model-client.mjs && node --check src/icons.mjs && node --check src/svg.mjs && node --check src/qa.mjs",
     "regression": "node scripts/regression.mjs",
     "validation": "node scripts/build-validation.mjs",
     "test": "node --test test/*.test.mjs"

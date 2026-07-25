@@ -1,7 +1,8 @@
 import PptxGenJS from "pptxgenjs";
 import { analyzeImage } from "./analyzer.mjs";
 import { RECONSTRUCTION_POLICY, isForbiddenFilledFallback } from "./policy.mjs";
-import { smallDetailSvg } from "./svg.mjs";
+import { catalogIconSvg } from "./icons.mjs";
+import { cleanPictureData, smallDetailSvg } from "./svg.mjs";
 
 function toSlideBox(bbox, analysis) {
   const sx = analysis.slide.width / analysis.image.width;
@@ -30,7 +31,9 @@ function addNativeShape(slide, component, analysis, pptx) {
   const box = toSlideBox(component.bbox, analysis);
   const fill = { color: component.colorHex, transparency: 0 };
   const noLine = { color: component.colorHex, transparency: 100 };
-  if (component.type === "roundRect") {
+  if (component.type === "rect") {
+    slide.addShape(pptx.ShapeType.rect, { ...box, fill, line: noLine });
+  } else if (component.type === "roundRect") {
     slide.addShape(pptx.ShapeType.roundRect, { ...box, fill, line: noLine, radius: 0.08 });
   } else if (component.type === "ellipse") {
     slide.addShape(pptx.ShapeType.ellipse, { ...box, fill, line: noLine });
@@ -56,18 +59,15 @@ function addNativeShape(slide, component, analysis, pptx) {
 
 function addText(slide, line, analysis) {
   const box = toSlideBox(line.bbox, analysis);
-  const isLongTitle = line.style.fontSize >= 20 && line.text.length >= 38;
-  if (isLongTitle) {
-    box.w = Math.min(analysis.slide.width - box.x - 0.18, Math.max(box.w, analysis.slide.width - box.x - 0.18));
-  }
-  const heightPadding = Math.max(0.015, box.h * 0.12);
+  const widthPadding = Math.max(0.025, Math.min(0.09, box.w * 0.035));
+  const heightPadding = Math.max(0.012, box.h * 0.08);
   slide.addText(line.text, {
-    x: Math.max(0, box.x - 0.01),
+    x: Math.max(0, box.x - widthPadding / 2),
     y: Math.max(0, box.y - heightPadding),
-    w: Math.min(analysis.slide.width - box.x, box.w + 0.04),
+    w: Math.min(analysis.slide.width - box.x + widthPadding / 2, box.w + widthPadding),
     h: Math.min(analysis.slide.height - box.y, box.h + heightPadding * 2),
     fontFace: line.style.fontFace,
-    fontSize: line.style.fontSize * (isLongTitle ? 0.88 : 1),
+    fontSize: line.style.fontSize,
     bold: line.style.bold,
     color: line.colorHex,
     margin: 0,
@@ -81,10 +81,36 @@ function addText(slide, line, analysis) {
   });
 }
 
-export async function convertImages(items, outputPath, { title = "Img2PPT editable export" } = {}) {
+function addIconBackground(slide, component, analysis, pptx) {
+  if (!component.backgroundShape || component.backgroundShape === "none") return;
+  const box = toSlideBox(component.bbox, analysis);
+  const shapeType = {
+    rect: pptx.ShapeType.rect,
+    roundRect: pptx.ShapeType.roundRect,
+    ellipse: pptx.ShapeType.ellipse
+  }[component.backgroundShape];
+  if (!shapeType) return;
+  slide.addShape(shapeType, {
+    ...box,
+    fill: { color: component.backgroundColorHex, transparency: 0 },
+    line: { color: component.backgroundColorHex, transparency: 100 }
+  });
+}
+
+export async function convertImages(items, outputPath, {
+  title = "Img2PPT editable export",
+  vision = {},
+  textModel = {}
+} = {}) {
   if (!items.length) throw new Error("At least one image is required.");
   const analyses = [];
-  for (const item of items) analyses.push(await analyzeImage(item.buffer, { sourceName: item.name }));
+  for (const item of items) {
+    analyses.push(await analyzeImage(item.buffer, {
+      sourceName: item.name,
+      vision,
+      textModel
+    }));
+  }
 
   const pptx = new PptxGenJS();
   const first = analyses[0];
@@ -109,18 +135,34 @@ export async function convertImages(items, outputPath, { title = "Img2PPT editab
 
     // Draw structural shapes first so all text stays above them.
     for (const component of analysis.components) {
-      if (["roundRect", "ellipse", "outlineRect", "line"].includes(component.type)) {
+      if (["rect", "roundRect", "ellipse", "outlineRect", "line"].includes(component.type)) {
         addNativeShape(slide, component, analysis, pptx);
       }
     }
 
-    for (const component of analysis.components.filter((c) => c.type === "icon")) {
+    for (const component of analysis.components.filter((c) => c.type === "picture")) {
+      const forbidden = isForbiddenFilledFallback({
+        width: component.width,
+        height: component.height,
+        filledRatio: 1
+      }, analysis.image);
+      // A model-confirmed content image is not a page-background fallback, but
+      // still cap it to keep the reconstruction editable.
+      if (forbidden && component.areaRatio > 0.6) continue;
+      const relevantText = component.containsText
+        ? analysis.textLines.filter((line) => overlapRatio(component.bbox, line.bbox) > 0)
+        : [];
+      const data = await cleanPictureData(item.buffer, component.bbox, relevantText);
+      slide.addImage({ data, ...toSlideBox(component.bbox, analysis) });
+    }
+
+    for (const component of analysis.components.filter((c) => ["icon", "semanticIcon"].includes(c.type))) {
       // Never preserve raster glyphs inside an icon crop when OCR has already
       // reconstructed that content as editable text.
-      if (analysis.textLines.some((line) => {
+      if (component.type === "icon" && analysis.textLines.some((line) => {
         const componentArea = Math.max(1, (component.bbox.x1 - component.bbox.x0) * (component.bbox.y1 - component.bbox.y0));
         const lineArea = Math.max(1, (line.bbox.x1 - line.bbox.x0) * (line.bbox.y1 - line.bbox.y0));
-        return overlapRatio(component.bbox, line.bbox) > 0.12 && componentArea < lineArea * 2.2;
+        return overlapRatio(component.bbox, line.bbox) > 0.62 && componentArea < lineArea * 1.25;
       })) continue;
       const forbidden = isForbiddenFilledFallback({
         width: component.width,
@@ -128,19 +170,33 @@ export async function convertImages(items, outputPath, { title = "Img2PPT editab
         filledRatio: component.fillRatio
       }, analysis.image);
       if (forbidden) continue;
-      const svg = await smallDetailSvg(
-        item.buffer,
-        component.bbox,
-        component.colorHex,
-        component.colorVariance,
-        component.groupedParts
-      );
+      if (component.type === "semanticIcon") addIconBackground(slide, component, analysis, pptx);
+      const svg = component.type === "semanticIcon" && !["other", "none"].includes(component.iconKey)
+        ? catalogIconSvg(
+          component.iconKey,
+          component.foregroundColorHex,
+          component.label || "Recommended vector icon"
+        )
+        : await smallDetailSvg(
+          item.buffer,
+          component.bbox,
+          component.foregroundColorHex || component.colorHex,
+          {
+            colorVariance: component.colorVariance,
+            groupedParts: component.groupedParts,
+            textLines: analysis.textLines,
+            foregroundColorHex: component.foregroundColorHex || component.colorHex,
+            backgroundColorHex: component.backgroundShape !== "none"
+              ? component.backgroundColorHex
+              : undefined
+          }
+        );
       slide.addImage({ data: svgDataUri(svg), ...toSlideBox(component.bbox, analysis) });
     }
 
     for (const line of analysis.textLines) addText(slide, line, analysis);
 
-    slide.addNotes(`Img2PPT QA summary\nSource: ${analysis.sourceName}\nNative shapes: ${analysis.summary.nativeShapeCount}\nText boxes: ${analysis.summary.textCount}\nSmall SVG details: ${analysis.summary.iconCount}\nLarge filled fallback: 0`);
+    slide.addNotes(`Img2PPT QA summary\nSource: ${analysis.sourceName}\nNative shapes: ${analysis.summary.nativeShapeCount}\nText boxes: ${analysis.summary.textCount}\nVector icons: ${analysis.summary.iconCount}\nContent images: ${analysis.summary.pictureCount}\nCloud vision used: ${analysis.summary.visionUsed}\nVision provider: ${analysis.summary.visionProvider || "none"}\nText model used: ${analysis.summary.textModelUsed}\nOCR corrections: ${analysis.summary.textCorrectionCount || 0}\nLarge filled fallback: 0`);
   }
 
   await pptx.writeFile({ fileName: outputPath });
