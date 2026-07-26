@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-title Img2PPT v0.5.1
+title Img2PPT v0.7.0 Recovery
 
 if not exist "runtime\node.exe" (
   echo.
@@ -21,7 +21,7 @@ if not exist "app\src\server.mjs" (
   exit /b 1
 )
 
-echo Starting Img2PPT v0.5.1...
+echo Starting Img2PPT v0.7.0 Recovery...
 echo Your browser will open automatically.
 "runtime\node.exe" "app\src\server.mjs"
 

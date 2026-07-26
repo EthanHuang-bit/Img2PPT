@@ -1,27 +1,47 @@
-import { createWorker, PSM } from "tesseract.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createWorker, PSM } from "tesseract.js";
 
-let workerPromise;
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const MAX_OCR_WORKERS = 4;
+const workers = new Set();
+const idleWorkers = [];
+const waiters = [];
+let creatingWorkers = 0;
 
-async function getWorker() {
-  if (!workerPromise) {
-    workerPromise = (async () => {
-      const worker = await createWorker("eng", 1, {
-        logger: () => {},
-        langPath: appRoot,
-        gzip: false,
-        cacheMethod: "none"
-      });
-      await worker.setParameters({
-        tessedit_pageseg_mode: PSM.SPARSE_TEXT,
-        preserve_interword_spaces: "1"
-      });
-      return worker;
-    })();
+async function makeWorker() {
+  const worker = await createWorker("eng", 1, {
+    logger: () => {},
+    langPath: appRoot,
+    gzip: false,
+    cacheMethod: "none"
+  });
+  await worker.setParameters({
+    tessedit_pageseg_mode: PSM.SPARSE_TEXT,
+    preserve_interword_spaces: "1"
+  });
+  workers.add(worker);
+  return worker;
+}
+
+async function acquireWorker() {
+  const idle = idleWorkers.pop();
+  if (idle) return idle;
+  if (workers.size + creatingWorkers < MAX_OCR_WORKERS) {
+    creatingWorkers += 1;
+    try {
+      return await makeWorker();
+    } finally {
+      creatingWorkers -= 1;
+    }
   }
-  return workerPromise;
+  return new Promise((resolve) => waiters.push(resolve));
+}
+
+function releaseWorker(worker) {
+  const next = waiters.shift();
+  if (next) next(worker);
+  else idleWorkers.push(worker);
 }
 
 function normalizeText(value) {
@@ -60,18 +80,31 @@ function collectLines(blocks = []) {
 }
 
 export async function recognizeText(imageBuffer, { psm = PSM.SPARSE_TEXT } = {}) {
-  const worker = await getWorker();
-  await worker.setParameters({ tessedit_pageseg_mode: psm });
-  const result = await worker.recognize(imageBuffer, {}, { blocks: true });
-  return collectLines(result.data.blocks);
+  const worker = await acquireWorker();
+  try {
+    await worker.setParameters({ tessedit_pageseg_mode: psm });
+    const result = await worker.recognize(imageBuffer, {}, { blocks: true });
+    return collectLines(result.data.blocks);
+  } finally {
+    releaseWorker(worker);
+  }
 }
 
 export { PSM };
 
 export async function closeOcr() {
-  if (workerPromise) {
-    const worker = await workerPromise;
-    await worker.terminate();
-    workerPromise = undefined;
-  }
+  if (waiters.length) throw new Error("Cannot close OCR while requests are waiting.");
+  const current = [...workers];
+  workers.clear();
+  idleWorkers.length = 0;
+  await Promise.all(current.map((worker) => worker.terminate()));
+}
+
+export function ocrPoolStatus() {
+  return {
+    maximum: MAX_OCR_WORKERS,
+    created: workers.size,
+    idle: idleWorkers.length,
+    waiting: waiters.length
+  };
 }

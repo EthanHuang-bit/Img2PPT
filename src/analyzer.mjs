@@ -3,7 +3,7 @@ import { RECONSTRUCTION_POLICY } from "./policy.mjs";
 import { colorDistance, luminance, medianColor, quantize, rgbHex } from "./color.mjs";
 import { boxArea, expandBox, intersects, mergeBoxes } from "./geometry.mjs";
 import { PSM, recognizeText } from "./ocr.mjs";
-import { analyzeWithVision } from "./vision.mjs";
+import { analyzeWithVisionFallback } from "./vision.mjs";
 import { enhanceTextLines } from "./text-model.mjs";
 
 function pixelAt(data, channels, width, x, y) {
@@ -635,7 +635,7 @@ export async function analyzeImage(imageBuffer, {
   const { data, info } = await normalized.raw().toBuffer({ resolveWithObject: true });
   const image = { width: info.width, height: info.height, channels: info.channels };
   const visionPromise = vision.enabled && vision.apiKey
-    ? analyzeWithVision(imageBuffer, {
+    ? analyzeWithVisionFallback(imageBuffer, {
       apiKey: vision.apiKey,
       model: vision.model,
       provider: vision.provider,
@@ -816,6 +816,10 @@ export async function analyzeImage(imageBuffer, {
       pictureCount: components.filter((c) => c.type === "picture").length,
       visionUsed: Boolean(visionLayout && !visionLayout.error),
       visionError: visionLayout?.error || null,
+      visionFallbackUsed: Boolean(visionLayout?.fallback?.used),
+      visionFallbackReason: visionLayout?.fallback?.reason || null,
+      visionFallbackSuccessfulRegions: visionLayout?.fallback?.successfulRegions || 0,
+      visionFallbackFailedRegions: visionLayout?.fallback?.failedRegions || 0,
       visionProvider: vision.enabled ? (visionLayout?.provider || vision.provider || null) : null,
       visionModel: vision.enabled ? (visionLayout?.model || vision.model || null) : null,
       textModelUsed: textEnhancement.used,

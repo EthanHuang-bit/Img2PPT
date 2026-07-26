@@ -10,7 +10,7 @@
     <main>
       <header>
         <div>
-          <div class="eyebrow">LOCAL · EDITABLE · PRIVATE</div>
+          <div class="eyebrow">v0.7 RECOVERY · LOCAL · EDITABLE · PRIVATE</div>
           <h1>Img2PPT</h1>
           <p>把概念图、架构图和商业流程图重建为可编辑的 PowerPoint 原生对象。</p>
         </div>
@@ -25,9 +25,9 @@
       </section>
 
       <section class="policy">
-        <div><strong>文字去重与擦除</strong><span>图片内文字先移除，再重建为可编辑文本</span></div>
-        <div><strong>图标分层</strong><span>徽章背景与纯色矢量图标分别生成</span></div>
-        <div><strong>智能版式</strong><span>字号同时受字高与文本宽度约束</span></div>
+        <div><strong>20 页并发</strong><span>每页独立识别，完成后立即缓存和刷新</span></div>
+        <div><strong>四分块回退</strong><span>整页失败时携带整页上下文拆分、拼接与去重</span></div>
+        <div><strong>质量门禁</strong><span>内容、版式、观感、可编辑性与模型复核分别评分</span></div>
       </section>
 
       <section id="queue" class="queue" hidden>
@@ -43,7 +43,7 @@
           <button id="analyzeButton" class="secondary">先分析</button>
           <button id="convertButton" class="primary">生成可编辑 PPT</button>
         </div>
-        <div id="status" class="status" hidden></div>
+        <div id="status" class="status" aria-live="polite" hidden></div>
         <div id="report" class="report" hidden></div>
       </section>
     </main>

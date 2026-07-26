@@ -2,6 +2,13 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import sharp from "sharp";
+import { allSettledConcurrent } from "./async-pool.mjs";
+import {
+  compareVisualBuffers,
+  evaluatePageQuality,
+  qualitySummary
+} from "./quality-engine.mjs";
+import { evaluateWithVisionModel } from "./visual-evaluator.mjs";
 
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -30,6 +37,31 @@ async function resolveCommand(name) {
 
 export async function renderPptx(pptxPath, renderDir) {
   await fs.mkdir(renderDir, { recursive: true });
+  if (process.platform === "win32") {
+    const quote = (value) => `'${String(value).replaceAll("'", "''")}'`;
+    const script = [
+      "$ErrorActionPreference = 'Stop'",
+      "$powerpoint = New-Object -ComObject PowerPoint.Application",
+      `$presentation = $powerpoint.Presentations.Open(${quote(path.resolve(pptxPath))}, $true, $false, $false)`,
+      `$presentation.Export(${quote(path.resolve(renderDir))}, 'PNG', 1600, 900)`,
+      "$presentation.Close()",
+      "$powerpoint.Quit()",
+      "[System.Runtime.InteropServices.Marshal]::ReleaseComObject($presentation) | Out-Null",
+      "[System.Runtime.InteropServices.Marshal]::ReleaseComObject($powerpoint) | Out-Null"
+    ].join("; ");
+    await run("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      script
+    ]);
+    return (await fs.readdir(renderDir))
+      .filter((file) => /^Slide\d+\.PNG$/i.test(file))
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+      .map((file) => path.join(renderDir, file));
+  }
   const soffice = await resolveCommand("soffice");
   const pdftoppm = await resolveCommand("pdftoppm");
   const profileDir = path.join(renderDir, "lo-profile");
@@ -49,6 +81,70 @@ export async function renderPptx(pptxPath, renderDir) {
     .filter((file) => /^slide-\d+\.png$/.test(file))
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
     .map((file) => path.join(renderDir, file));
+}
+
+export async function evaluateDeckQuality({
+  pptxPath,
+  renderDir,
+  items,
+  analyses,
+  audit,
+  vision = {},
+  modelConcurrency = 2
+}) {
+  const renderedPaths = await renderPptx(pptxPath, renderDir);
+  if (renderedPaths.length !== items.length) {
+    throw new Error(`PPT 渲染页数不一致：预期 ${items.length}，实际 ${renderedPaths.length}。`);
+  }
+  const settled = await allSettledConcurrent(items, async (item, index) => {
+    const renderedBuffer = await fs.readFile(renderedPaths[index]);
+    const visual = await compareVisualBuffers(item.buffer, renderedBuffer);
+    let modelEvaluation = null;
+    let modelError = null;
+    if (vision.enabled && vision.apiKey) {
+      try {
+        modelEvaluation = await evaluateWithVisionModel(item.buffer, renderedBuffer, vision);
+      } catch (error) {
+        modelError = error.message;
+      }
+    }
+    const quality = evaluatePageQuality({
+      analysis: analyses[index],
+      auditSlide: audit.slides[index],
+      visual,
+      modelEvaluation
+    });
+    return {
+      index,
+      sourceName: item.name,
+      renderedPath: renderedPaths[index],
+      ...quality,
+      modelError
+    };
+  }, { concurrency: Math.max(1, Math.min(2, modelConcurrency)) });
+  const pages = settled.map((result, index) => {
+    if (result.status === "fulfilled") return result.value;
+    return {
+      index,
+      sourceName: items[index]?.name || `page-${index + 1}`,
+      overallScore: 0,
+      contentScore: 0,
+      layoutScore: 0,
+      appearanceScore: 0,
+      editabilityScore: 0,
+      pixelSimilarity: 0,
+      modelScore: null,
+      validationLevel: "local-precheck",
+      passed: false,
+      diagnostics: [{
+        category: "quality-runtime",
+        severity: "critical",
+        message: String(result.reason?.message || result.reason),
+        action: "检查 PowerPoint/LibreOffice 渲染和质量评测环境"
+      }]
+    };
+  });
+  return { pages, summary: qualitySummary(pages) };
 }
 
 export async function compareImages(referencePath, renderedPath, diffPath) {

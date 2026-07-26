@@ -1,5 +1,6 @@
 import PptxGenJS from "pptxgenjs";
 import { analyzeImage } from "./analyzer.mjs";
+import { mapConcurrent, normalizeConcurrency } from "./async-pool.mjs";
 import { RECONSTRUCTION_POLICY, isForbiddenFilledFallback } from "./policy.mjs";
 import { catalogIconSvg } from "./icons.mjs";
 import { cleanPictureData, smallDetailSvg } from "./svg.mjs";
@@ -100,18 +101,40 @@ function addIconBackground(slide, component, analysis, pptx) {
 export async function convertImages(items, outputPath, {
   title = "Img2PPT editable export",
   vision = {},
-  textModel = {}
+  textModel = {},
+  concurrency = 20,
+  onPageComplete,
+  qualityByPage = []
 } = {}) {
   if (!items.length) throw new Error("At least one image is required.");
-  const analyses = [];
-  for (const item of items) {
-    analyses.push(await analyzeImage(item.buffer, {
+  const analyses = await mapConcurrent(items, async (item) =>
+    analyzeImage(item.buffer, {
       sourceName: item.name,
       vision,
       textModel
-    }));
-  }
+    }), {
+    concurrency: normalizeConcurrency(concurrency, 20, 20),
+    onSettled: async (event) => {
+      if (event.status === "fulfilled") {
+        await onPageComplete?.({
+          index: event.index,
+          item: event.item,
+          analysis: event.value
+        });
+      }
+    }
+  });
+  await writePptx(items, analyses, outputPath, { title, qualityByPage });
+  return analyses;
+}
 
+export async function writePptx(items, analyses, outputPath, {
+  title = "Img2PPT editable export",
+  qualityByPage = []
+} = {}) {
+  if (!items.length || items.length !== analyses.length) {
+    throw new Error("PPT generation requires one cached analysis per image.");
+  }
   const pptx = new PptxGenJS();
   const first = analyses[0];
   pptx.defineLayout({ name: "IMG2PPT", width: first.slide.width, height: first.slide.height });
@@ -196,9 +219,12 @@ export async function convertImages(items, outputPath, {
 
     for (const line of analysis.textLines) addText(slide, line, analysis);
 
-    slide.addNotes(`Img2PPT QA summary\nSource: ${analysis.sourceName}\nNative shapes: ${analysis.summary.nativeShapeCount}\nText boxes: ${analysis.summary.textCount}\nVector icons: ${analysis.summary.iconCount}\nContent images: ${analysis.summary.pictureCount}\nCloud vision used: ${analysis.summary.visionUsed}\nVision provider: ${analysis.summary.visionProvider || "none"}\nText model used: ${analysis.summary.textModelUsed}\nOCR corrections: ${analysis.summary.textCorrectionCount || 0}\nLarge filled fallback: 0`);
+    const quality = qualityByPage[index];
+    const scoreNotes = quality
+      ? `\nSimilarity: ${Number(quality.overallScore * 100).toFixed(2)}%\nValidation level: ${quality.validationLevel}\nQuality gates: ${quality.passed ? "passed" : "review required"}`
+      : "\nSimilarity: not evaluated";
+    slide.addNotes(`Img2PPT QA summary\nSource: ${analysis.sourceName}\nNative shapes: ${analysis.summary.nativeShapeCount}\nText boxes: ${analysis.summary.textCount}\nVector icons: ${analysis.summary.iconCount}\nContent images: ${analysis.summary.pictureCount}\nCloud vision used: ${analysis.summary.visionUsed}\nVision fallback split: ${analysis.summary.visionFallbackUsed || false}\nVision provider: ${analysis.summary.visionProvider || "none"}\nText model used: ${analysis.summary.textModelUsed}\nOCR corrections: ${analysis.summary.textCorrectionCount || 0}\nLarge filled fallback: 0${scoreNotes}`);
   }
 
   await pptx.writeFile({ fileName: outputPath });
-  return analyses;
 }
